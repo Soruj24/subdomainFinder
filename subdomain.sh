@@ -1,96 +1,44 @@
 #!/bin/bash
 
-# Usage: ./strong-recon.sh example.com
+# Default domains file
+input="domains.txt"
+output_dir="recon-results"
 
-if [ -z "$1" ]; then
-  echo "Usage: $0 <domain>"
-  exit 1
-fi
+# Check tools
+for tool in subfinder assetfinder httpx; do
+  if ! command -v $tool &> /dev/null; then
+    echo "[✗] Tool $tool not found. Install it first."
+    exit 1
+  fi
+done
 
-domain=$1
-output_dir="recon-$domain"
-mkdir -p $output_dir
+# Create output directory
+mkdir -p "$output_dir"
 
-echo "[+] Starting Recon on: $domain"
-echo "[+] Output directory: $output_dir"
+echo "[*] Starting recon on $(wc -l < $input) domains..."
 
-#######################
-# Subdomain Enumeration
-#######################
+# Loop through each domain
+while read -r domain; do
+  [[ -z "$domain" ]] && continue
+  echo -e "\n[+] Recon on: $domain"
 
-echo "[+] Sublist3r..."
-sublist3r -d $domain -o $output_dir/sublist3r.txt
+  domain_dir="$output_dir/$domain"
+  mkdir -p "$domain_dir"
 
-echo "[+] Amass..."
-amass enum -d $domain -o $output_dir/amass.txt
+  echo "[*] Running Subfinder..."
+  subfinder -d "$domain" -silent -o "$domain_dir/subfinder.txt"
 
-echo "[+] Knockpy..."
-knockpy $domain --output $output_dir/knockpy
+  echo "[*] Running Assetfinder..."
+  assetfinder --subs-only "$domain" > "$domain_dir/assetfinder.txt"
 
-echo "[+] Subfinder..."
-subfinder -d $domain -o $output_dir/subfinder.txt
+  # Merge, dedup
+  cat "$domain_dir/"*.txt | sort -u > "$domain_dir/all_subdomains.txt"
 
-echo "[+] AssetFinder..."
-assetfinder --subs-only $domain > $output_dir/assetfinder.txt
+  echo "[*] Probing live subdomains with httpx..."
+  httpx -l "$domain_dir/all_subdomains.txt" -silent -status-code -title -ip -o "$domain_dir/live.txt"
 
-echo "[+] Findomain..."
-findomain --target $domain --output - > $output_dir/findomain.txt
+  echo "[✓] Done with $domain | Live: $(wc -l < "$domain_dir/live.txt")"
 
-# Combine and sort all subdomains
-cat $output_dir/*.txt $output_dir/knockpy/$domain.csv | sort -u | grep $domain > $output_dir/all_subdomains.txt
-echo "[+] Total unique subdomains found: $(wc -l < $output_dir/all_subdomains.txt)"
+done < "$input"
 
-####################
-# DNS Resolution
-####################
-
-echo "[+] Resolving subdomains with massdns..."
-massdns -r /path/to/resolvers.txt -t A -o S -w $output_dir/resolved.txt $output_dir/all_subdomains.txt
-
-# Extract valid domains from massdns output
-awk '{print $1}' $output_dir/resolved.txt | sed 's/\.$//' | sort -u > $output_dir/resolved_domains.txt
-
-####################
-# Live Host Checking
-####################
-
-echo "[+] Probing for live subdomains using httpx..."
-httpx -l $output_dir/resolved_domains.txt -silent -status-code -title -tech-detect -o $output_dir/live_hosts.txt
-
-####################
-# DNS Brute-force
-####################
-
-echo "[+] Running AltDNS..."
-altdns -i $output_dir/all_subdomains.txt -o $output_dir/altdns_output.txt -w /path/to/words.txt -r -s $output_dir/altdns_resolved.txt
-
-echo "[+] DNSrecon zone transfer test..."
-dnsrecon -d $domain -a > $output_dir/dnsrecon.txt
-
-echo "[+] Fierce scan..."
-fierce --domain $domain > $output_dir/fierce.txt
-
-####################
-# Web Directory Bruteforce
-####################
-
-echo "[+] Gobuster vhost scan on live subdomains..."
-while read sub; do
-  gobuster vhost -u http://$sub -w /path/to/vhosts.txt -o $output_dir/gobuster_$sub.txt
-done < $output_dir/resolved_domains.txt
-
-####################
-# Port Scanning
-####################
-
-echo "[+] RustScan fast port scan..."
-while read ip; do
-  rustscan -a $ip -r 1-65535 --ulimit 5000 -b 500 -o $output_dir/rustscan_$ip.txt
-done < <(awk '{print $2}' $output_dir/resolved.txt | sort -u)
-
-####################
-# Final Notes
-####################
-
-echo "[+] Recon completed. All output saved in $output_dir/"
-echo "[+] Live hosts found: $(wc -l < $output_dir/live_hosts.txt)"
+echo -e "\n[✔] Recon completed. Results in '$output_dir/'"
